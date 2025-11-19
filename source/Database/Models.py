@@ -1,20 +1,24 @@
-from typing import List, Optional
-from pydantic import BaseModel, Field
 
+from sqlalchemy import create_engine, Column, Integer, String, Table, ForeignKey
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.ext.declarative import declarative_base
 
-class UserModel(BaseModel):
-    id: int = Field(alias="_id")
-    name: str
-    channels: List[int] = Field(default_factory=list)
+Base = declarative_base()
 
-    class Config:
-        populate_by_name = True
+user_channels = Table('user_channels', Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id')),
+    Column('channel_id', Integer, ForeignKey('channels.id'))
+)
 
+class UserModel(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    channels = relationship("ChannelModel", secondary=user_channels, back_populates="users")
 
-class ChannelModel(BaseModel):
-    id: int = Field(alias="_id")
-    name: str
-    subscribers: int = 0
-
-    class Config:
-        populate_by_name = True
+class ChannelModel(Base):
+    __tablename__ = 'channels'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    subscribers = Column(Integer, default=0)
+    users = relationship("UserModel", secondary=user_channels, back_populates="channels")

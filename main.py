@@ -1,12 +1,11 @@
-from source import get_config, TeleRagService
+from source import TeleRagService
 import asyncio
 
 async def main():
     """
     Main function to start the TeleRagService.
     """
-    settings = get_config()
-    service = TeleRagService(settings)
+    service = TeleRagService()
     await service.start()
     await service.idle()
 

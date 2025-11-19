@@ -1,0 +1,31 @@
+# Logging Level: DEBUG, INFO, WARNING, ERROR
+log_level: "INFO"
+
+# Настройки для RAG (Retrieval-Augmented Generation)
+rag:
+  host: "localhost"
+  port: 8080
+  n_result: 5
+  sentence_transformer_model: "sentence-transformers/all-MiniLM-L6-v2"
+  mistral_api_key: "ntjavJIULlU8o5RR9BJi5vgnQP4tZjdB"
+  mistral_model: "mistral-7b"
+
+# Настройки Pyrogram для сбора сообщений
+pyrogram:
+  api_id: "33554158"
+  api_hash: "3f9844072b83ab3c93fd9899f3d9aa15"
+  history_limit: 100
+
+# Настройки базы данных PostgreSQL
+# ВАЖНО: При запуске через docker-compose, host должен быть 'postgres'
+database:
+  user: "user"
+  password: "password"
+  host: "postgres" # Имя сервиса из docker-compose
+  port: 5432
+  db: "telerag_db"
+
+# Настройки Telegram-бота (Aiogram)
+aiogram:
+  api_key: "7982519817:AAFJStmSYYxKh3znlcMn22PUhMKclnLFA9Q"
+

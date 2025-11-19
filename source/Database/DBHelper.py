@@ -1,157 +1,92 @@
-from typing import List, Optional, Set
-from motor.motor_asyncio import (
-    AsyncIOMotorClient,
-    AsyncIOMotorDatabase,
-    AsyncIOMotorCollection
-)
 
-from pymongo.errors import CollectionInvalid
+from typing import List, Optional
+from sqlalchemy import create_engine, select, delete, update
+from sqlalchemy.orm import sessionmaker, Session
 from source.Logging import Logger
-
-from source.Database.Models import UserModel, ChannelModel
-from source.TelegramMessageScrapper.Base import Scrapper, ScrapSIG, ChannelRecord
-from source.ChromaАndRAG.ChromaClient import RagClient
-
-
+from source.Database.Models import UserModel, ChannelModel, Base
 
 class DataBaseHelper:
-    def __init__(self, db: AsyncIOMotorDatabase):
-        self.mongo_db_logger = Logger("MongoDB", "network.log")
-        self.db = db
-        self.users: AsyncIOMotorCollection = db["users"]
-        self.channels: AsyncIOMotorCollection = db["channels"]
+    def __init__(self, db_url: str):
+        self.db_logger = Logger("PostgreSQL", "network.log")
+        self.engine = create_engine(db_url)
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
 
+    def _get_session(self) -> Session:
+        return self.Session()
 
-    @classmethod
-    async def create(
-        cls,
-        uri: str = "",
-        db_name: str = "",
-    ) -> "DataBaseHelper":
-        client = AsyncIOMotorClient(uri)
-        db = client[db_name]
-        self = cls(db)
-        await self._setup()
-        await self.mongo_db_logger.info("MongoDB connected")
-        return self
+    def create_user(self, user_id: int, name: str) -> None:
+        with self._get_session() as session:
+            if session.get(UserModel, user_id):
+                self.db_logger.warning(f"User '{user_id}' already exists")
+                raise ValueError("User already exists")
+            user = UserModel(id=user_id, name=name)
+            session.add(user)
+            session.commit()
 
-    async def _setup(self) -> None:
-        collections = await self.db.list_collection_names()
-        if "users" not in collections:
-            try:
-                await self.db.create_collection("users")
-            except CollectionInvalid:
-                await self.mongo_db_logger.warning("Collection 'users' already exists")
-        if "channels" not in collections:
-            try:
-                await self.db.create_collection("channels")
-            except CollectionInvalid:
-                await self.mongo_db_logger.warning("Collection 'channels' already exists")
+    def delete_user(self, user_id: int) -> None:
+        with self._get_session() as session:
+            user = session.get(UserModel, user_id)
+            if not user:
+                self.db_logger.warning(f"User '{user_id}' not found")
+                raise ValueError("User not found")
+            session.delete(user)
+            session.commit()
 
-    async def create_user(self, user_id: int, name: str) -> None:
-        if await self.users.find_one({"_id": user_id}):
-            await self.mongo_db_logger.warning(f"User '{user_id}' already exists")
-            raise ValueError("User already exists")
-        user = UserModel(
-            name=name,
-            _id=user_id,
-        )
-        await self.users.insert_one(user.dict(by_alias=True))
+    def update_user_channels(self, user_id: int, add: Optional[List[int]] = None, remove: Optional[List[int]] = None) -> None:
+        with self._get_session() as session:
+            user = session.get(UserModel, user_id)
+            if not user:
+                raise ValueError("User not found")
 
-    async def delete_user(self, user_id: int) -> None:
-        user_doc = await self.users.find_one({"_id": user_id})
-        if not user_doc:
-            await self.mongo_db_logger.warning(f"User '{user_id}' not found")
-            raise ValueError("User not found")
+            if add:
+                for channel_id in add:
+                    channel = session.get(ChannelModel, channel_id)
+                    if not channel:
+                        raise ValueError(f"Channel {channel_id} does not exist")
+                    user.channels.append(channel)
+                    channel.subscribers += 1
 
-        user = UserModel(**user_doc)
-        for channel_id in user.channels:
-            await self._decrement_channel(channel_id)
+            if remove:
+                for channel_id in remove:
+                    channel = session.get(ChannelModel, channel_id)
+                    if channel in user.channels:
+                        user.channels.remove(channel)
+                        channel.subscribers -= 1
+            
+            session.commit()
 
-        await self.users.delete_one({"_id": user_id})
+    def get_user(self, user_id: int) -> UserModel:
+        with self._get_session() as session:
+            user = session.get(UserModel, user_id)
+            if not user:
+                raise ValueError("User not found")
+            return user
 
-    async def update_user_channels(
-        self,
-        user_id: int,
-        add: Optional[List[int]] = None,
-        remove: Optional[List[int]] = None
-    ) -> None:
-        doc = await self.users.find_one({"_id": user_id})
-        if not doc:
-            raise ValueError("User not found")
+    def create_channel(self, channel_id: int, name: str) -> None:
+        with self._get_session() as session:
+            if session.get(ChannelModel, channel_id):
+                self.db_logger.warning(f"Channel '{channel_id}' already exists. Will not create one.")
+                raise ValueError("Channel already exists")
+            channel = ChannelModel(id=channel_id, name=name)
+            session.add(channel)
+            session.commit()
 
-        user = UserModel(**doc)
-        current: Set[int] = set(user.channels)
-        to_add = set(add or [])
-        to_remove = set(remove or [])
+    def delete_channel(self, channel_id: int) -> None:
+        with self._get_session() as session:
+            channel = session.get(ChannelModel, channel_id)
+            if not channel:
+                raise ValueError("Channel not found")
 
-        for ch in to_add:
-            if not await self.channels.find_one({"_id": ch}):
-                raise ValueError(f"Channel {ch} does not exist")
+            if channel.subscribers > 0:
+                raise ValueError("Channel has subscribers")
 
-        for ch in to_add - current:
-            await self._increment_channel(ch)
-        for ch in to_remove & current:
-            await self._decrement_channel(ch)
+            session.delete(channel)
+            session.commit()
 
-        updated = (current | to_add) - to_remove
-        user.channels = list(updated)
-
-        await self.users.replace_one(
-            {"_id": user_id},
-            user.dict(by_alias=True)
-        )
-
-    async def get_user(self, user_id: int) -> UserModel:
-        doc = await self.users.find_one({"_id": user_id})
-        if not doc:
-            raise ValueError("User not found")
-        return UserModel(**doc)
-
-    async def create_channel(self, channel_id: int, name: str) -> None:
-        if await self.channels.find_one({"_id": channel_id}):
-            await self.mongo_db_logger.warning(f"Channel '{channel_id}' already exists. Will not create one.")
-            raise ValueError("Channel already exists")
-        print("Created channel " + str(name))
-        channel = ChannelModel(_id=channel_id, name=name)
-        await self.channels.insert_one(channel.dict(by_alias=True))
-
-
-
-    async def delete_channel(self, channel_id: int) -> None:
-        doc = await self.channels.find_one({"_id": channel_id})
-        if not doc:
-            raise ValueError("Channel not found")
-
-        if doc["subscribers"] > 0:
-            raise ValueError("Channel has subscribers")
-
-        await self.channels.delete_one({"_id": channel_id})
-
-
-    async def get_channel(self, channel_id: int) -> ChannelModel:
-        doc = await self.channels.find_one({"id": channel_id})
-        if not doc:
-            raise ValueError("Channel not found")
-        return ChannelModel(**doc)
-
-    async def _increment_channel(self, channel_id: int) -> None:
-        await self.channels.update_one(
-            {"_id": channel_id},
-            {"$inc": {"subscribers": 1}}
-        )
-
-    async def _decrement_channel(self, channel_id: int) -> None:
-        doc = await self.channels.find_one({"_id": channel_id})
-        if not doc:
-            return
-
-        if doc["subscribers"] <= 1:
-            await self.channels.delete_one({"_id": channel_id})
-        else:
-            await self.channels.update_one(
-                {"id": channel_id},
-                {"$inc": {"subscribers": -1}}
-            )
-
-
+    def get_channel(self, channel_id: int) -> ChannelModel:
+        with self._get_session() as session:
+            channel = session.get(ChannelModel, channel_id)
+            if not channel:
+                raise ValueError("Channel not found")
+            return channel
