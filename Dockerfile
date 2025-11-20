@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-LABEL authors="MartisArch"
+LABEL authors="Python-XXna!"
 
 # Установка зависимостей системы
 RUN apt-get update && apt-get install -y \
