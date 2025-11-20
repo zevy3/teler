@@ -4,7 +4,7 @@ import asyncio
 from source.Logging import Logger, LoggerComposer
 from source.Database.DBHelper import DataBaseHelper
 from source.TgUI.BotApp import BotApp
-from source.ChromaАndRAG.ChromaClient import RagClient
+from source.ChromaAndRAG.ChromaClient import RagClient
 from source.TelegramMessageScrapper.Base import Scrapper
 
 from source.DynamicConfigurationLoading import get_config

@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
     libffi-dev \
-    mongodb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,4 +27,4 @@ EXPOSE 8080
 EXPOSE 27017
 
 # Запуск MongoDB и приложения
-CMD ["sh", "-c", "mongod --bind_ip_all --dbpath /data/db & python main.py"]
+CMD ["python", "main.py"]

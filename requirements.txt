@@ -4,6 +4,8 @@ pyrogram
 SQLAlchemy
 psycopg2-binary
 chromadb-client
-mistral-client
+mistralai
 sentence-transformers
 torch
+TgCrypto
+openai

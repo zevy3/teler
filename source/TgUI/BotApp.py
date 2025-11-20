@@ -18,7 +18,7 @@ from aiogram.types import (
 from source.TgUI.States import AddSourceStates
 from source.Logging import Logger
 from source.Database.DBHelper import DataBaseHelper
-from source.ChromaАndRAG.ChromaClient import RagClient
+from source.ChromaAndRAG.ChromaClient import RagClient
 from source.TelegramMessageScrapper.Base import Scrapper
 import re, asyncio
 
