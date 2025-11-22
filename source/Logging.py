@@ -256,15 +256,6 @@ class ComposerMeta(type):
         except Exception as e:
             raise ValueError("Failed to add logger to composer.") from e
 
-
-
-
-
-
-
-
-
-
 class RotType(enum.Enum):
     NONE = 0
     TIME = 1
@@ -350,19 +341,22 @@ class Logger(BaseLogger, metaclass=ComposerMeta):
         return f"[{timestamp} - {self.name}/{level_string}] -> {message}"
 
     async def _process_queue(self):
-        while self._logging and self._file_gateway:
+        while self._logging:
             try:
-                level, msg = await self._message_queue.get()
-                if msg is None:
+                item = await self._message_queue.get()
+                if item is None:
+                    if self._file_gateway:
+                        await self._file_gateway.enqueue(None)
                     break
+                level, msg = item
                 message = self._apply_decorations(level, msg)
-                await self._file_gateway.enqueue(message)
+                await aprint(message)
+                if self._file_gateway:
+                    await self._file_gateway.enqueue(message)
             except (asyncio.CancelledError, LoggingCancellation):
                 break
             except Exception as e:
-                await aprint_err(
-                    f"Logger {self.name} failed to log message: {e}",
-                )
+                await aprint_err(f"Logger {self.name} failed to log message: {e}")
 
     async def stop(self):
         self._logging = False
@@ -484,10 +478,10 @@ class FileGateway:
         Process message stream.
         """
         should_rotate = False
-        async with aiofiles.open(
-            f"{os.path.splitext(self.file_loc)[0]}_{self._start_stamp}.log",
-            mode="a"
-        ) as IOstream:
+        log_file_path = f"{os.path.splitext(self.file_loc)[0]}_{self._start_stamp}.log"
+        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+        async with aiofiles.open(log_file_path, mode="a") as IOstream:
             await IOstream.write(self.boilerplate_message() + "\n" + "-" * 20 + "\n")
             await IOstream.flush()
             while self._logging:
@@ -497,16 +491,15 @@ class FileGateway:
                         break
                     await IOstream.write(msg + "\n")
                     await IOstream.flush()
-                    if self.rotate_if_needed(int(datetime.now().timestamp()), os.path.getsize(self.file_loc)):
+                    # Corrected the file path for size checking
+                    if self.rotate_if_needed(int(datetime.now().timestamp()), os.path.getsize(log_file_path)):
                         should_rotate = True
                         break
 
                 except (asyncio.CancelledError, LoggingCancellation):
                     break
                 except Exception as e:
-                    await aprint_err(
-                        f"FileGateway failed to write message to file: {e}",
-                    )
+                    await aprint_err(f"FileGateway failed to write message to file: {e}")
 
         if should_rotate:
             await self._rotate_file()
@@ -516,30 +509,41 @@ class FileGateway:
         Stop the file gateway.
         """
         self._logging = False
-        await self._message_stream.join()
-
-        self._processing_task.cancel()
-        try:
-            await self._processing_task
-        except asyncio.CancelledError:
-            pass
+        if self._message_stream:
+             await self._message_stream.put(None) # Sentinel to unblock queue
+        if self._processing_task:
+            self._processing_task.cancel()
+            try:
+                await self._processing_task
+            except asyncio.CancelledError:
+                pass
 
 async def aprint(message: str, sep: str = " ",end: str = "\n", *args):
     """
     async print function
     """
-    if args:
-        for arg in args:
-            message += sep + str(arg)
-    message += end
-    await asyncio.to_thread(sys.stdout.write, message.encode("utf-8"))
+    try:
+        loop = asyncio.get_running_loop()
+        full_message = message
+        if args:
+            for arg in args:
+                full_message += sep + str(arg)
+        full_message += end
+        await loop.run_in_executor(None, sys.stdout.write, full_message)
+    except Exception:
+        print(message, *args, sep=sep, end=end) # Fallback
 
 async def aprint_err(message: str, sep: str = " ", end: str ="\n", *args):
-    if args:
-        for arg in args:
-            message += sep + str(arg)
-    message += end
-    await asyncio.to_thread(sys.stderr.write, message.encode("utf-8"))
+    try:
+        loop = asyncio.get_running_loop()
+        full_message = message
+        if args:
+            for arg in args:
+                full_message += sep + str(arg)
+        full_message += end
+        await loop.run_in_executor(None, sys.stderr.write, full_message)
+    except Exception:
+        print(message, *args, sep=sep, end=end, file=sys.stderr) # Fallback
 
 def stop_logging():
     """

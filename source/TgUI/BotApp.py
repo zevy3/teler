@@ -1,12 +1,10 @@
-from typing import Optional
+from typing import Optional, Set
 
 from aiogram.client.default import DefaultBotProperties
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
-    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
@@ -15,24 +13,27 @@ from aiogram.types import (
     KeyboardButton,
 )
 
-from source.TgUI.States import AddSourceStates
 from source.Logging import Logger
 from source.Database.DBHelper import DataBaseHelper
 from source.ChromaAndRAG.ChromaClient import RagClient
-from source.TelegramMessageScrapper.Base import Scrapper
+from source.TelegramMessageScrapper.Base import Scrapper, ScrapSIG, ChannelRecord
 import re, asyncio
 
-
+# --- Клавиатура --- #
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="❓ Задать вопрос")],
+        [KeyboardButton(text="ℹ️ Как добавить канал")],
+        [KeyboardButton(text="📚 Мои каналы"), KeyboardButton(text="🗑 Удалить канал")],
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
 
 class BotApp:
     def __init__(self, token: str,db_helper: Optional[DataBaseHelper], rag: RagClient, scrapper: Scrapper):
         self.telegram_ui_logger = Logger("TelegramUI", "network.log")
-        self.bot = Bot(
-            token=token,
-            default=DefaultBotProperties(
-                parse_mode="HTML",
-            )
-        )
+        self.bot = Bot(token=token, default=DefaultBotProperties(parse_mode="HTML"))
         self.dispatcher = Dispatcher(storage=MemoryStorage())
         self.router = Router()
         self.dispatcher.include_router(self.router)
@@ -53,366 +54,220 @@ class BotApp:
             self.DataBaseHelper = db_helper
 
     def __include_handlers(self):
-        # --- Хэндлеры для сообщений ---
         self.router.message.register(self.__start_handler, F.text == "/start")
-        self.router.message.register(
-            self.__licence_handler, F.text == "/licence"
-        )
-        self.router.message.register(self.__end_handler, F.text == "/end")
-        self.router.message.register(
-            self.__add_command_handler, F.text == "/add"
-        )
-        self.router.message.register(
-            self.__remove_command_handler, F.text == "/remove"
-        )
-        self.router.message.register(self.__get_channels, F.text == "/get_channels")
-        self.router.message.register(
-            self.__handle_source, AddSourceStates.waiting_for_source
-        )
-        self.router.message.register(
-            self.__cancel_handler, F.text == "Отмена🔴"
-        )
-        self.router.message.register(self.__message_handler)  # Хендлер RAG
-
-        # --- Хэндлеры для инлайн-кнопок, коллбэки ---
+        self.router.message.register(self.__ask_question_handler, F.text == "❓ Задать вопрос")
+        self.router.message.register(self.__add_command_handler, F.text.in_(["/add", "ℹ️ Как добавить канал"]))
+        self.router.message.register(self.__get_channels, F.text.in_(["/get_channels", "📚 Мои каналы"]))
+        self.router.message.register(self.__remove_command_handler, F.text.in_(["/remove", "🗑 Удалить канал"]))
+        self.router.message.register(self.__forward_message_handler, F.forward_date)
+        self.router.message.register(self.__main_text_handler, F.text)
         self.router.callback_query.register(self.__inline_button_handler)
 
     async def __start_handler(self, message: Message):
         await self.telegram_ui_logger.info(f"User {message.from_user.id} started the bot.")
-
         await self.bot.set_my_commands([
-            BotCommand(command="/start", description="Начать работу с ботом"),
-            BotCommand(command="/add", description="Добавить источник"),
-            BotCommand(command="/remove", description="Удалить источник"),
-            BotCommand(command="/end", description="Удалить аккаунт"),
-            BotCommand(command="/licence", description="Информация о лицензии")
+            BotCommand(command="/start", description="🚀 Перезапустить бота"),
+            BotCommand(command="/add", description="ℹ️ Как добавить канал"),
+            BotCommand(command="/get_channels", description="📚 Показать мои каналы"),
+            BotCommand(command="/remove", description="🗑 Удалить канал"),
         ])
-
         await message.answer(
-            f"Добро пожаловать, {message.from_user.first_name}!\n\n"
-            "<u>Доступные команды:</u>\n\n"
-            "/add — для добавления источника,\n"
-            "/remove — для удаления \n"
-            "/end — чтобы удалить свой аккаунт.\n\n"
-            "Для получения информации о лицензии используйте /licence.",
-            reply_markup=ReplyKeyboardRemove()
+            f"👋 Добро пожаловать, {message.from_user.first_name}!\n\nЯ — ваш личный ассистент для работы с информацией из Telegram-каналов.",
+            reply_markup=main_keyboard
         )
 
     @staticmethod
-    async def __licence_handler(message: Message):
-        await message.answer(
-            "Проект находится под лицензией AGPL v3:\n"
-            "https://www.gnu.org/licenses/agpl-3.0.txt"
-        )
-
-
-    async def __end_handler(self, message: Message):
-        await message.answer(
-            "Вы успешно вышли из сервиса. Все данные будут удалены.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        self.DataBaseHelper.delete_user(message.from_user.id)
+    async def __ask_question_handler(message: Message):
+        await message.answer("Просто напишите ваш вопрос в этот чат, и я постараюсь найти на него ответ.", reply_markup=main_keyboard)
 
     @staticmethod
-    async def __add_command_handler(
-        message: Message, state: FSMContext
-    ):
-        cancel_button = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Отмена🔴")]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
+    async def __add_command_handler(message: Message):
         await message.answer(
-            "Введите ссылку на источник или нажмите 'Отмена🔴':",
-            reply_markup=cancel_button
-        )
-        await state.set_state(AddSourceStates.waiting_for_source)
-
-    @staticmethod
-    async def __cancel_handler( message: Message, state: FSMContext):
-        await state.clear()
-        await message.answer(
-            "Добавление источника отменено.",
-            reply_markup=ReplyKeyboardRemove()
+            "<b>Чтобы добавить новый канал, есть два простых способа:</b>\n\n" \
+            "1. Просто **перешлите** мне любое сообщение из нужного вам публичного канала.\n" \
+            "2. Отправьте мне ссылку на канал в формате `@username` или `https://t.me/username`.",
+            reply_markup=main_keyboard, disable_web_page_preview=True
         )
 
-    async def __handle_source(self, message: Message, state: FSMContext):
-        if message.text == "Отмена🔴":
-            await self.__cancel_handler(message, state)
-            return
-
-        source_link = message.text
-
-        # Get channel id from the link
-        channel_name = re.search(r"(?:https?://)?t\.me/([a-zA-Z0-9_]+)", source_link)
-        if not channel_name:
-            await message.answer(
-                "Некорректная ссылка на источник. Пожалуйста, попробуйте снова."
-            )
-            await self.__cancel_handler(message, state)
-            return
-
-        channel_chat = await self.bot.get_chat(f"@{channel_name.group(1)}")
-        if not channel_chat:
-            await message.answer(
-                "Не удалось получить ID канала. Пожалуйста, проверьте ссылку и попробуйте снова."
-            )
-            await self.__cancel_handler(message, state)
-            return
-        channel_id = channel_chat.id
+    async def __process_channel_addition(self, message: Message, channel_id: int, channel_title: str):
         try:
-            self.DataBaseHelper.get_user(message.from_user.id)
-        except ValueError:
-            self.DataBaseHelper.create_user(
-                message.from_user.id,
-                message.from_user.first_name
-            )
+            try: self.DataBaseHelper.get_user(message.from_user.id)
+            except ValueError: await self.DataBaseHelper.create_user(message.from_user.id, message.from_user.first_name)
 
-        try:
-            self.DataBaseHelper.update_user_channels(
-                message.from_user.id,
-                add=[channel_id]
-            )
-        except Exception:
             try:
-                print("Adding new channel ", channel_chat.title)
-                self.DataBaseHelper.create_channel(channel_id, channel_chat.title)
-                print("Added new channel ", channel_chat.title)
-                self.DataBaseHelper.update_user_channels(
-                    user_id=message.from_user.id,
-                    add=[channel_id]
-                )
-                print("Updated channels for user", message.from_user.first_name)
-            except ValueError:
-                await message.answer(
-                    "Канал уже добавлен в источники. Возможно вы уже добавляли его ранее."
-                )
-                await self.__cancel_handler(message, state)
+                await self.DataBaseHelper.create_channel(channel_id, channel_title)
+            except ValueError: 
+                pass
+            
+            user_channels = self.DataBaseHelper.get_user_channels(message.from_user.id)
+            if channel_id in user_channels:
+                await message.answer(f'Канал "{channel_title}" уже был в вашем списке.', reply_markup=main_keyboard)
                 return
 
-        await message.answer(
-            f"Источник \"{source_link}\" добавлен!",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
+            self.DataBaseHelper.update_user_channels(user_id=message.from_user.id, add=[channel_id])
+
+            await self.RagClient.create_collection_if_not_exists(channel_id, channel_title)
+            await self.Scrapper.update([ChannelRecord(channel_id=channel_id, action=ScrapSIG.SUB)])
+
+            await message.answer(f'✅ Источник "{channel_title}" успешно добавлен!', reply_markup=main_keyboard)
+        except Exception as e:
+            await self.telegram_ui_logger.error(f"Error adding channel for user {message.from_user.id}: {e}")
+            await message.answer("Произошла ошибка при добавлении канала.", reply_markup=main_keyboard)
 
     async def __get_channels(self, message: Message):
-        try:
-            user_channels = self.DataBaseHelper.get_user_channels(message.from_user.id)
-        except ValueError:
-            await message.answer(
-                "Вы не зарегистрированы в системе. Добавьте хотя бы один источник, чтобы получить доступ к этой функции."
-            )
-            return None
+        try: user_channels = self.DataBaseHelper.get_user_channels(message.from_user.id)
+        except ValueError: 
+            await message.answer("Вы не зарегистрированы. Добавьте канал, переслав сообщение из него.", reply_markup=main_keyboard)
+            return
 
-        if not user_channels:
-            await message.answer(
-                "У вас нет добавленных источников. Пожалуйста, добавьте хотя бы один источник."
-            )
-            return None
-
-        channel_names = []
-        for channel_id in user_channels:
-            chat = await self.bot.get_chat(channel_id)
-            if chat:
-                channel_names.append(f"id: {channel_id}, Имя: {chat.title}")
-            else:
-                channel_names.append(f"id: {channel_id}, Имя: Неизвестный канал")
-
-        await message.answer(
-            "Ваши источники:\n" + "\n".join(channel_names),
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-        return None
+        if not user_channels: 
+            await message.answer("У вас пока нет добавленных каналов.", reply_markup=main_keyboard)
+            return
+        
+        channel_details = self.DataBaseHelper.get_channels_by_ids(user_channels)
+        channel_names = [f"• {name}" for id, name in channel_details]
+        await message.answer("<b>Ваши источники:</b>\n" + "\n".join(channel_names), reply_markup=main_keyboard)
 
     async def __get_channels_internal(self, user_id: int):
-        try:
-            user_channels = self.DataBaseHelper.get_user_channels(user_id)
-        except ValueError:
-            return None
-
-        if not user_channels:
-            return None
-
-        channel_names = []
-        for channel_id in user_channels:
-            chat = await self.bot.get_chat(channel_id)
-            if chat:
-                channel_names.append({"id": channel_id, "name": chat.title})
-            else:
-                channel_names.append({"id": channel_id, "name": "Неизвестный канал"})
-
-        return channel_names
+        try: user_channels = self.DataBaseHelper.get_user_channels(user_id)
+        except ValueError: return None
+        if not user_channels: return None
+        
+        channel_details = self.DataBaseHelper.get_channels_by_ids(user_channels)
+        return [{"id": id, "name": name} for id, name in channel_details]
 
     async def __remove_command_handler(self, message: Message):
         channels = await self.__get_channels_internal(message.from_user.id)
-        if not channels:
-            await message.answer(
-                "У вас нет добавленных источников. Пожалуйста, добавьте хотя бы один источник."
-            )
+        if not channels: 
+            await message.answer("У вас нет каналов для удаления.", reply_markup=main_keyboard)
             return
-        await self.__send_paginated_channels(message, channels, page=1)
+        await self.__send_paginated_channels(message, channels, 1)
 
-    @staticmethod
-    async def __send_paginated_channels(
-        message: Message,
-        channels,
-        page: int
-    ):
+    async def __send_paginated_channels(self, message: Message, channels, page: int):
         items_per_page = 5
-        start = (page - 1) * items_per_page
-        end = start + items_per_page
+        start, end = (page - 1) * items_per_page, page * items_per_page
         current_page_channels = channels[start:end]
 
-        inline_keyboard = [
-            [
-                InlineKeyboardButton(
-                    text=channel["name"],
-                    callback_data=f"usr:{message.from_user.id} rm:{channel['id']}"
-                )
-            ]
-            for channel in current_page_channels
-        ]
+        inline_keyboard = [[InlineKeyboardButton(text=f"❌ {ch['name']}", callback_data=f"rm:{ch['id']}")] for ch in current_page_channels]
 
-        navigation_buttons = []
-        if page > 1:
-            navigation_buttons.append(InlineKeyboardButton(
-                text="<<<", callback_data=f"page:{page - 1}"))
-        if end < len(channels):
-            navigation_buttons.append(InlineKeyboardButton(
-                text=">>>", callback_data=f"page:{page + 1}"))
-        if navigation_buttons:
-            inline_keyboard.append(navigation_buttons)
+        nav_buttons = []
+        if page > 1: nav_buttons.append(InlineKeyboardButton(text="<< Назад", callback_data=f"page:{page - 1}"))
+        if end < len(channels): nav_buttons.append(InlineKeyboardButton(text="Вперед >>", callback_data=f"page:{page + 1}"))
+        
+        if nav_buttons: inline_keyboard.append(nav_buttons)
+        
+        inline_keyboard.append([InlineKeyboardButton(text="✔️ Готово", callback_data="done_removing")])
 
         markup = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+        text = "Нажмите на канал, чтобы удалить его:"
+        try: await message.edit_text(text, reply_markup=markup)
+        except: await message.answer(text, reply_markup=markup)
 
-        try:
-            await message.edit_text(
-                "Выберите канал для удаления:",
-                reply_markup=markup
-            )
-        except Exception:
-            await message.delete()
-            await message.answer(
-                "Выберите канал для удаления:",
-                reply_markup=markup
-            )
+    async def __inline_button_handler(self, cb: CallbackQuery):
+        await cb.answer()
+        data = cb.data
 
-    async def __inline_button_handler(self, callback_query: CallbackQuery):
-        callback_data = callback_query.data
-        if callback_data.startswith("usr:"):
-            usr_str, channel_str = callback_data.split(" ")
-            user_id = int(usr_str.split(":")[1])
-            channel_id = int(channel_str.split(":")[1])
+        if data.startswith("rm:"):
+            channel_id_to_remove = int(data.split(":")[1])
+            self.DataBaseHelper.update_user_channels(cb.from_user.id, remove=[channel_id_to_remove])
+            
+            all_users = self.DataBaseHelper.get_all_users()
+            is_channel_still_used = any(channel_id_to_remove in self.DataBaseHelper.get_user_channels(user.id) for user in all_users)
+
+            if not is_channel_still_used:
+                await self.telegram_ui_logger.info(f"Channel {channel_id_to_remove} is no longer used by any user. Removing completely.")
+                await self.RagClient.delete_channel(channel_id_to_remove)
+                self.DataBaseHelper.delete_channel(channel_id_to_remove) 
+                await self.Scrapper.update([ChannelRecord(channel_id=channel_id_to_remove, action=ScrapSIG.UNSUB)])
+
+            channels = await self.__get_channels_internal(user_id=cb.from_user.id)
+            if not channels:
+                await cb.message.edit_text("Все каналы удалены.", reply_markup=None)
+                return
+            await self.__send_paginated_channels(cb.message, channels, 1)
+
+        elif data.startswith("page:"):
+            page = int(data.split(":")[1])
+            channels = await self.__get_channels_internal(cb.from_user.id)
+            if channels: await self.__send_paginated_channels(cb.message, channels, page)
+            else: await cb.message.edit_text("Все каналы удалены.", reply_markup=None)
+
+        elif data == "done_removing":
+            await cb.message.delete()
+            await self.bot.send_message(cb.from_user.id, "Готово!", reply_markup=main_keyboard)
+
+    async def __forward_message_handler(self, message: Message):
+        if message.forward_from_chat and message.forward_from_chat.id:
+            await self.__process_channel_addition(message, message.forward_from_chat.id, message.forward_from_chat.title)
+        else:
+            await message.answer("😔 **Не удалось добавить источник.**\n\nЯ работаю только с **публичными** каналами.", reply_markup=main_keyboard)
+
+    async def __main_text_handler(self, message: Message):
+        if message.from_user.id == self.bot.id: return
+
+        match = re.search(r'(?:https?://)?(?:t\.me/|@)([a-zA-Z0-9_]{5,})', message.text)
+        if match:
             try:
-                self.DataBaseHelper.update_user_channels(
-                    user_id,
-                    remove=[channel_id]
-                )
-                await callback_query.message.edit_text(
-                    f"Канал с ID {channel_id} будет удалён."
-                )
-            except ValueError:
-                await callback_query.message.edit_text(
-                    f"Канал с ID {channel_id} не найден."
-                )
-        elif callback_data.startswith("page:"):
-            page = int(callback_data.split(":")[1])
-            channels = await self.__get_channels_internal(user_id=callback_query.from_user.id)
-            await self.__send_paginated_channels(
-                callback_query.message,
-                channels,
-                page
-            )
-        await callback_query.answer()
-
-
-    async def __message_handler(self, message: Message):
-        if not message.text:
-            await message.answer(
-                "Пожалуйста, отправьте текстовое сообщение."
-                " Стикеры, голосовые и другие типы"
-                " сообщений не поддерживаются."
-            )
+                chat = await self.bot.get_chat(f"@{match.group(1)}")
+                await self.__process_channel_addition(message, chat.id, chat.title)
+            except Exception as e:
+                await self.telegram_ui_logger.error(f"Failed to get chat for {match.group(1)}: {e}")
+                await message.answer(f"Не удалось найти канал '{match.group(1)}'. Убедитесь, что ссылка верна.", reply_markup=main_keyboard)
             return
 
-        if message.from_user.id == self.bot.id:
-            await message.answer(
-                "Черезвычайно извиняюсь, но я не могу обрабатывать сообщения от себя."
-            )
+        await self.__rag_query_handler(message)
+
+    async def __rag_query_handler(self, message: Message):
+        try: user_channels = self.DataBaseHelper.get_user_channels(message.from_user.id)
+        except ValueError: 
+            await message.answer("Вы не зарегистрированы. Добавьте канал, чтобы задавать вопросы.", reply_markup=main_keyboard)
+            return
+        if not user_channels: 
+            await message.answer("У вас нет источников. Добавьте канал, чтобы я мог отвечать на вопросы.", reply_markup=main_keyboard)
             return
 
-        try:
-            user_channels: list[int] = self.DataBaseHelper.get_user_channels(
-                message.from_user.id
-            )
-        except ValueError:
-            await self.telegram_ui_logger.error("Could not get user from DB.")
-            await message.answer(
-                "Вы не зарегистрированы в системе. Пожалуйста, добавьте источник, чтобы получить доступ к этой функции."
-            )
-            return
-
-        if not user_channels:
-            await self.telegram_ui_logger.error(
-                "User has no channels. Or there is something wrong with DB."
-            )
-            await message.answer(
-                "У вас нет добавленных источников. Пожалуйста, добавьте хотя бы один источник."
-            )
-            return
-
-        await self.request_queueue.put(
-            (message.from_user.id, message.text, user_channels)
-        )
-        await message.answer(
-            "Сообщение получено! Ожидайте ответа RAG."
-        )
-
+        await self.request_queueue.put((message.from_user.id, message.text, user_channels))
+        await message.answer("✅ Ваш запрос принят. Ищу ответ...", reply_markup=main_keyboard)
 
     async def __request_loop(self):
         while True:
-            user_id, request, channel_ids = await self.request_queueue.get()
-            await self.telegram_ui_logger.info(f"Started processing RAG request for {user_id} with request: {request}.")
-            await self.RagClient.query(user_id, request, channel_ids)
+            try:
+                user_id, request, channel_ids = await self.request_queueue.get()
+                await self.telegram_ui_logger.info(f"Processing RAG request for {user_id}: {request}")
+                await self.RagClient.query(user_id, request, channel_ids)
+            except Exception as e:
+                await self.telegram_ui_logger.error(f"Error in request loop: {e}")
 
     async def __response_loop(self):
         while True:
-            user_id, response = await self.RagClient.rag_response_queue.get()
-            await self.telegram_ui_logger.info(f"Got response from RAG for {user_id}")
             try:
-                await self.bot.send_message(user_id, response)
-            except Exception as e:
+                user_id, response = await self.RagClient.rag_response_queue.get()
+                await self.telegram_ui_logger.info(f"Got response from RAG for {user_id}")
+                await self.bot.send_message(user_id, response, reply_markup=main_keyboard)
+            except Exception as e: 
                 await self.telegram_ui_logger.error(f"Failed to send message to {user_id}: {e}")
 
-
-
-
-
-
     async def start(self):
-        # сначала запускаем фоновые таски RAG
-        if self._request_task is None or self._request_task.done():
-            self._request_task = asyncio.create_task(self.__request_loop())
-        if self._response_task is None or self._response_task.done():
-            self._response_task = asyncio.create_task(self.__response_loop())
+        try:
+            # <<< ИЗМЕНЕНИЕ ЗДЕСЬ >>>
+            all_users = self.DataBaseHelper.get_all_users()
+            active_channel_ids: Set[int] = set()
+            for user in all_users:
+                user_channels = self.DataBaseHelper.get_user_channels(user.id)
+                active_channel_ids.update(user_channels)
 
-        # потом запускаем polling (эта строка блокирует до остановки бота)
+            if active_channel_ids:
+                records = [ChannelRecord(channel_id=ch_id, action=ScrapSIG.SUB) for ch_id in active_channel_ids]
+                await self.Scrapper.update(records)
+            # <<<
+        except Exception as e:
+            await self.telegram_ui_logger.error(f"Failed to initialize scrapper with channels from DB: {e}")
+
+        if self._request_task is None or self._request_task.done(): self._request_task = asyncio.create_task(self.__request_loop())
+        if self._response_task is None or self._response_task.done(): self._response_task = asyncio.create_task(self.__response_loop())
         await self.dispatcher.start_polling(self.bot)
 
     async def stop(self):
-        if self._request_task:
-            self._request_task.cancel()
-            try:
-                await self._request_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._response_task:
-            self._response_task.cancel()
-            try:
-                await self._response_task
-            except asyncio.CancelledError:
-                pass
+        if self._request_task: self._request_task.cancel()
+        if self._response_task: self._response_task.cancel()
         await self.bot.session.close()

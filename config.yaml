@@ -5,10 +5,10 @@ log_level: "INFO"
 rag:
   host: "localhost"
   port: 8080
-  n_result: 5
+  n_result: 20
   sentence_transformer_model: "sentence-transformers/all-MiniLM-L6-v2"
-  mistral_api_key: "ntjavJIULlU8o5RR9BJi5vgnQP4tZjdB"
-  mistral_model: "mistral-7b"
+  mistral_api_key: "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"
+  mistral_model: "mistralai/mistral-7b-instruct-v0.1"
 
 # Настройки Pyrogram для сбора сообщений
 pyrogram:
