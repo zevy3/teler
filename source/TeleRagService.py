@@ -42,6 +42,7 @@ class TeleRagService:
             token=settings.aiogram.api_key,
             rag=self.RagClient,
             db_helper=None,
+            scrapper=self.Scrapper,
         )
         self.logger_composer.set_level_if_not_set()
         self.stop_event = asyncio.Event()

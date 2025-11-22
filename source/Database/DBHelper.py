@@ -1,7 +1,7 @@
 
 from typing import List, Optional
 from sqlalchemy import create_engine, select, delete, update
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, joinedload
 from source.Logging import Logger
 from source.Database.Models import UserModel, ChannelModel, Base
 
@@ -57,11 +57,26 @@ class DataBaseHelper:
             session.commit()
 
     def get_user(self, user_id: int) -> UserModel:
+        """Оставляем для совместимости, но старайся не использовать .channels снаружи."""
         with self._get_session() as session:
             user = session.get(UserModel, user_id)
             if not user:
                 raise ValueError("User not found")
+            # возвращаем привязанный объект — использовать только поля, не ленивые связи
             return user
+
+    def get_user_channels(self, user_id: int) -> list[int]:
+        """Вернуть список ID каналов пользователя (без DetachedInstanceError)."""
+        with self._get_session() as session:
+            user = (
+                session.query(UserModel)
+                .options(joinedload(UserModel.channels))
+                .get(user_id)
+            )
+            if not user:
+                raise ValueError("User not found")
+
+            return [ch.id for ch in user.channels]
 
     def create_channel(self, channel_id: int, name: str) -> None:
         with self._get_session() as session:

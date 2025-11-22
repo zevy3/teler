@@ -19,9 +19,9 @@ pyrogram:
 # Настройки базы данных PostgreSQL
 # ВАЖНО: При запуске через docker-compose, host должен быть 'postgres'
 database:
-  user: "user"
-  password: "password"
-  host: "postgres" # Имя сервиса из docker-compose
+  user: "telerag_user"
+  password: "telerag_password"
+  host: "localhost" # Имя сервиса из docker-compose
   port: 5432
   db: "telerag_db"
 
